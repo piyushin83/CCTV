@@ -2,43 +2,57 @@ import streamlit as st
 import cv2
 import os
 import subprocess
-import time
+import requests
+import tarfile
 
-# --- STEP 1: AUTO-CONNECT TO TAILSCALE ---
-def start_tailscale():
+# --- TAILSCALE MANUAL INSTALLER (Bypasses packages.txt errors) ---
+def setup_tailscale():
     auth_key = st.secrets["TAILSCALE_AUTHKEY"]
-    if not os.path.exists("/dev/net/tun"):
-        # This part handles the cloud environment setup
-        subprocess.run(["sudo", "tailscale", "up", "--authkey", auth_key, "--hostname=streamlit-app"], check=True)
+    
+    # Check if tailscale is already running
+    if os.path.exists("/tmp/tailscaled.sock"):
+        return
 
-# Run tailscale connection once at start
+    st.info("Setting up secure tunnel...")
+    
+    # Download Tailscale binary directly
+    ts_version = "1.56.1" # Stable version
+    url = f"https://pkgs.tailscale.com/stable/tailscale_{ts_version}_amd64.tgz"
+    
+    if not os.path.exists("tailscale"):
+        r = requests.get(url, stream=True)
+        with open("ts.tgz", "wb") as f:
+            f.write(r.raw.read())
+        with tarfile.open("ts.tgz") as tar:
+            tar.extractall()
+        # Move binaries to a simpler path
+        os.rename(f"tailscale_{ts_version}_amd64", "ts_bin")
+
+    # Start Tailscale Daemon in background
+    subprocess.Popen(["./ts_bin/tailscaled", "--tun=userspace-networking", "--socks5-server=localhost:1055"])
+    
+    # Connect to your network
+    subprocess.run(["./ts_bin/tailscale", "up", "--authkey", auth_key, "--hostname=streamlit-cloud-app"], check=True)
+    st.success("Tunnel Active!")
+
+# Try to connect
 try:
-    start_tailscale()
+    if "TAILSCALE_AUTHKEY" in st.secrets:
+        setup_tailscale()
 except Exception as e:
-    st.error(f"Tailscale Connection Failed: {e}")
+    st.error(f"Tunnel Error: {e}")
 
-# --- STEP 2: DASHBOARD UI ---
-st.set_page_config(page_title="India SafeHome SaaS", layout="wide")
-st.title("📹 Home Live Feed (Secure Tunnel)")
+# --- MAIN APP ---
+st.title("📹 India SafeHome CCTV")
+rtsp_url = st.sidebar.text_input("Enter Home RTSP (e.g. rtsp://192.168.1.10...)", type="password")
 
-# Replace with your REAL internal camera IP
-# Example: rtsp://username:password@192.168.1.10:554/stream1
-RTSP_URL = st.sidebar.text_input("Camera RTSP Link", type="password")
-
-if st.button("Start Monitor"):
-    if not RTSP_URL:
-        st.warning("Please enter your RTSP link in the sidebar.")
-    else:
-        st.success("Connected via Tailscale Tunnel")
-        placeholder = st.empty()
-        cap = cv2.VideoCapture(RTSP_URL)
-        
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                st.error("Lost connection to home camera.")
-                break
-            
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            placeholder.image(frame, channels="RGB", use_container_width=True)
-            time.sleep(0.03) # Match FPS
+if rtsp_url:
+    cap = cv2.VideoCapture(rtsp_url)
+    frame_placeholder = st.empty()
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            st.warning("Waiting for stream...")
+            break
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        frame_placeholder.image(frame, channels="RGB")
